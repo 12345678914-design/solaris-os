@@ -1,0 +1,7 @@
+Bienvenido a SOLARIS 3.0.
+
+Este archivo vive en un sistema de archivos ext4 real, montado
+desde el disco principal (ATA) y leido en modo solo-lectura por el
+explorador de archivos del escritorio.
+
+Prueba la Fase 2: abre el explorador y navega por carpetas.

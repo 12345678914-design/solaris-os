@@ -1,0 +1,6 @@
+querido usuario:
+
+gracias por probar este sistema operativo de hobby.
+cada linea que ves aqui fue leida desde un inodo ext4.
+
+atentamente, el kernel

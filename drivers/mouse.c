@@ -6,6 +6,22 @@ static int g_w = 1024, g_h = 768;
 static int g_izq, g_der;
 static int g_movido, g_click;
 
+/* Tamano del puntero: el cursor no debe salirse por abajo/derecha. */
+#define CURSOR_W 12
+#define CURSOR_H 16
+#define CURSOR_MARGIN 2
+
+static void mouse_clamp(void) {
+    int maxx = g_w - CURSOR_W - CURSOR_MARGIN;
+    int maxy = g_h - CURSOR_H - CURSOR_MARGIN;
+    if (maxx < 0) maxx = 0;
+    if (maxy < 0) maxy = 0;
+    if (g_x < 0) g_x = 0;
+    if (g_y < 0) g_y = 0;
+    if (g_x > maxx) g_x = maxx;
+    if (g_y > maxy) g_y = maxy;
+}
+
 static uint8_t g_pkt[3];
 static int     g_idx;
 
@@ -36,8 +52,7 @@ static uint8_t mouse_resp(void) {
 
 void mouse_set_bounds(int w, int h) {
     g_w = w; g_h = h;
-    if (g_x >= g_w) g_x = g_w - 1;
-    if (g_y >= g_h) g_y = g_h - 1;
+    mouse_clamp();
 }
 
 void mouse_init(void) {
@@ -89,10 +104,7 @@ void mouse_feed(uint8_t byte) {
 
     g_x += dx;
     g_y -= dy;
-    if (g_x < 0) g_x = 0;
-    if (g_y < 0) g_y = 0;
-    if (g_x >= g_w) g_x = g_w - 1;
-    if (g_y >= g_h) g_y = g_h - 1;
+    mouse_clamp();
 
     int nl = fl & 0x01;
     int nr = (fl >> 1) & 0x01;

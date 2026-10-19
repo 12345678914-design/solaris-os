@@ -1,0 +1,4 @@
+Recordatorios:
+- Probar el explorador de archivos.
+- Navegar con doble clic.
+- ESC para volver a la terminal.

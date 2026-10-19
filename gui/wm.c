@@ -5,6 +5,7 @@
 #include "drivers/framebuffer.h"
 #include "drivers/rtc.h"
 #include "fs/fsram.h"
+#include "fs/ext4.h"
 
 /* Acciones del sistema (definidas en kernel.c). */
 void apagar(void);
@@ -14,8 +15,8 @@ void reiniciar(void);
 #define TB_H       44      /* alto de la barra de tareas */
 #define TITLE_H    30      /* alto de la barra de titulo */
 #define BTN        26      /* lado del boton cerrar */
-#define UI_SCALE   2
-#define TX_SCALE   1
+#define UI_SCALE   200     /* 16x16 (titulos, barra de tareas) */
+#define TX_SCALE   150     /* 12x12 (texto de contenido) */
 
 /* ---- Paleta (0xRRGGBB) ---- */
 #define C_DESK_TOP   0x1B3358
@@ -32,12 +33,23 @@ void reiniciar(void);
 #define C_TEXT_DIM   0xAAB2C0
 #define C_GREEN      0x2FD37A
 #define C_CLOSE      0xE0453A
+#define C_FOLDER     0x4FA3FF
+#define C_SEL        0x243044
+
+/* Tipos de ventana */
+#define WK_FILES   0     /* explorador ext4 */
+#define WK_ABOUT   1
+#define WK_VIEW    2     /* visor de texto */
+#define WK_FSRAM   4     /* listado fsram (RAM) */
 
 typedef struct {
     int  used;
     int  x, y, w, h;
     char title[48];
     int  kind;
+    uint32_t dir_ino;    /* carpeta actual (explorador) o archivo (visor) */
+    char path[192];
+    int  sel;
 } win_t;
 
 static win_t g_wins[WM_MAX];
@@ -96,20 +108,33 @@ int wm_window_count(void) {
     return n;
 }
 
-void wm_open(const char *title, int x, int y, int w, int h, int kind) {
+int wm_open(const char *title, int x, int y, int w, int h, int kind) {
     int slot = -1;
     for (int i = 0; i < WM_MAX; i++) if (!g_wins[i].used) { slot = i; break; }
-    if (slot < 0) return;
+    if (slot < 0) return -1;
 
     win_t *wi = &g_wins[slot];
     wi->used = 1;
     wi->x = x; wi->y = y; wi->w = w; wi->h = h;
     wi->kind = kind;
+    wi->dir_ino = 0;
+    wi->sel = -1;
+    wi->path[0] = '/';
+    wi->path[1] = '\0';
     strncpy(wi->title, title, 47);
     wi->title[47] = '\0';
 
     z_raise(slot);
     g_focus = slot;
+    return slot;
+}
+
+void wm_set_dir(int slot, uint32_t ino) {
+    if (slot < 0 || slot >= WM_MAX || !g_wins[slot].used) return;
+    g_wins[slot].dir_ino = ino;
+    g_wins[slot].path[0] = '/';
+    g_wins[slot].path[1] = '\0';
+    g_wins[slot].sel = -1;
 }
 
 static void wm_close(int idx) {
@@ -144,6 +169,74 @@ static void draw_close_btn(win_t *w, int activa) {
         gfx_pixel(bx + i + 1, by + (BTN - 1 - i), col);
     }
     (void)activa;
+}
+
+static void draw_files(win_t *w);
+static int  explorer_entry(uint32_t dir, int vis, ext4_dirent_t *de);
+static void explorer_enter(win_t *w, ext4_dirent_t *de);
+
+static void draw_explorer(win_t *w) {
+    int px = w->x + 12;
+    int py = w->y + TITLE_H + 8;
+    int scale = TX_SCALE;
+    int lh = gfx_text_h(scale) + 8;
+
+    gfx_text(px, py, "Disco: ext4 (solo lectura)", C_GREEN, 0xFFFFFFFF, scale);
+    py += lh;
+    gfx_text(px, py, w->path, C_TEXT_DIM, 0xFFFFFFFF, scale);
+    py += lh;
+    gfx_fill(px, py - 3, w->w - 24, 1, C_WIN_LINE);
+    int listTop = py;
+    int maxrows = (w->y + w->h - 26 - listTop) / lh;
+    if (maxrows < 1) maxrows = 1;
+
+    ext4_dirent_t de;
+    int shown = 0;
+    for (int i = 0; i < maxrows; i++) {
+        if (!explorer_entry(w->dir_ino, i, &de)) break;
+        int ry = listTop + i * lh;
+        if (i == w->sel)
+            gfx_fill(w->x + 6, ry - 3, w->w - 12, lh, C_SEL);
+        int isdir = (de.type == EXT4_FT_DIR);
+        gfx_text(px + 6, ry, isdir ? "[D]" : "   ",
+                 isdir ? C_FOLDER : C_TEXT_DIM, 0xFFFFFFFF, scale);
+        gfx_text(px + 6 + gfx_text_w("[D] ", scale), ry, de.name,
+                 isdir ? C_FOLDER : C_TEXT, 0xFFFFFFFF, scale);
+        shown++;
+    }
+    if (shown == 0)
+        gfx_text(px, listTop, "(vacio)", C_TEXT_DIM, 0xFFFFFFFF, scale);
+}
+
+static void draw_viewer(win_t *w) {
+    static uint8_t buf[8192];
+    int n = ext4_read(w->dir_ino, buf, sizeof(buf));
+    if (n < 0) n = 0;
+
+    int px = w->x + 12;
+    int py = w->y + TITLE_H + 10;
+    int scale = TX_SCALE;
+    int cw = gfx_text_w("M", scale);
+    int lh = gfx_text_h(scale) + 4;
+    int maxch = (w->w - 24) / (cw ? cw : 1);
+    if (maxch < 1) maxch = 1;
+
+    int x = px, col = 0;
+    for (int i = 0; i < n; i++) {
+        char c = (char)buf[i];
+        if (c == '\r') continue;
+        if (c == '\n' || col >= maxch) {
+            x = px; py += lh; col = 0;
+            if (py > w->y + w->h - 14) break;
+            if (c == '\n') continue;
+        }
+        if (c < 32 || c > 126) c = ' ';
+        char s[2] = { c, '\0' };
+        gfx_text(x, py, s, C_TEXT, 0xFFFFFFFF, scale);
+        x += cw; col++;
+    }
+    if (n == 0)
+        gfx_text(px, py, "(archivo vacio)", C_TEXT_DIM, 0xFFFFFFFF, scale);
 }
 
 static void draw_files(win_t *w) {
@@ -204,7 +297,7 @@ static void draw_about(win_t *w) {
     gfx_text(px, py, "Arquitectura: x86_64 / long mode", C_TEXT, 0xFFFFFFFF, scale); py += lh;
     gfx_text(px, py, "Kernel:       1.0", C_TEXT, 0xFFFFFFFF, scale); py += lh;
     gfx_text(px, py, "Shell:        solaris-sh", C_TEXT, 0xFFFFFFFF, scale); py += lh;
-    gfx_text(px, py, "Filesystem:   fsram (en RAM)", C_TEXT, 0xFFFFFFFF, scale); py += lh;
+    gfx_text(px, py, "Filesystem:   ext4 (disco, RO)", C_TEXT, 0xFFFFFFFF, scale); py += lh;
 
     char buf[48];
     char num[16];
@@ -241,8 +334,10 @@ static void draw_window(int idx) {
 
     /* contenido */
     gfx_clip_set(w->x, w->y + TITLE_H, w->w, w->h - TITLE_H);
-    if (w->kind == 0)      draw_files(w);
-    else if (w->kind == 1) draw_about(w);
+    if (w->kind == WK_FILES)      draw_explorer(w);
+    else if (w->kind == WK_ABOUT) draw_about(w);
+    else if (w->kind == WK_VIEW)  draw_viewer(w);
+    else if (w->kind == WK_FSRAM) draw_files(w);
     gfx_clip_reset();
 }
 
@@ -251,7 +346,7 @@ static int tb_window_rect(int k, int *bx, int *bw) {
     int x = 128;
     for (int i = 0; i < g_nz; i++) {
         int idx = g_z[i];
-        int tw = str_w(g_wins[idx].title, 1) + 26;
+        int tw = str_w(g_wins[idx].title, UI_SCALE) + 26;
         if (i == k) { *bx = x; *bw = tw; return idx; }
         x += tw + 6;
     }
@@ -269,8 +364,8 @@ static void draw_taskbar(void) {
     /* Boton inicio */
     gfx_fill(8, ty + 7, 112, TB_H - 14, C_BTN_FACE);
     gfx_frame(8, ty + 7, 112, TB_H - 14, C_ACCENT);
-    gfx_text(24, ty + (TB_H - gfx_text_h(UI_SCALE)) / 2,
-             "SOLARIS", C_TEXT, 0xFFFFFFFF, UI_SCALE);
+    gfx_text(24, ty + (TB_H - gfx_text_h(TX_SCALE)) / 2,
+             "SOLARIS", C_TEXT, 0xFFFFFFFF, TX_SCALE);
 
     /* Botones de ventana */
     for (int k = 0; k < g_nz; k++) {
@@ -278,8 +373,8 @@ static void draw_taskbar(void) {
         int idx = tb_window_rect(k, &bx, &bw);
         int activa = (idx == g_focus);
         gfx_fill(bx, ty + 7, bw, TB_H - 14, activa ? C_ACCENT : C_BTN_FACE);
-        gfx_text(bx + 12, ty + (TB_H - gfx_text_h(1)) / 2,
-                 g_wins[idx].title, C_TEXT, 0xFFFFFFFF, 1);
+        gfx_text(bx + 12, ty + (TB_H - gfx_text_h(UI_SCALE)) / 2,
+                 g_wins[idx].title, C_TEXT, 0xFFFFFFFF, UI_SCALE);
     }
 
     /* Reloj */
@@ -300,10 +395,11 @@ static void draw_taskbar(void) {
 /* ------------------------------ Menu inicio ------------------------------- */
 typedef struct { const char *label; int kind; } menu_item_t;
 static const menu_item_t g_menu[] = {
-    { "Archivos",   0 },
-    { "Acerca de",  1 },
-    { "Reiniciar", -1 },
-    { "Apagar",    -2 },
+    { "Archivos (ext4)", WK_FILES },
+    { "fsram (RAM)",     WK_FSRAM },
+    { "Acerca de",       WK_ABOUT },
+    { "Reiniciar",       -1 },
+    { "Apagar",          -2 },
 };
 #define MENU_N ((int)(sizeof(g_menu)/sizeof(g_menu[0])))
 #define MENU_W 220
@@ -329,8 +425,8 @@ static void draw_menu(void) {
 
     for (int i = 0; i < MENU_N; i++) {
         int iy = my + 4 + i * MENU_IH;
-        gfx_text(mx + 16, iy + (MENU_IH - gfx_text_h(1)) / 2,
-                 g_menu[i].label, C_TEXT, 0xFFFFFFFF, 1);
+        gfx_text(mx + 16, iy + (MENU_IH - gfx_text_h(TX_SCALE)) / 2,
+                 g_menu[i].label, C_TEXT, 0xFFFFFFFF, TX_SCALE);
     }
 }
 
@@ -344,8 +440,12 @@ static void menu_click(int myy) {
     g_menu_open = 0;
     if (kind == -1) { reiniciar(); }
     else if (kind == -2) { apagar(); }
-    else if (kind == 0) { wm_open("Archivos", 140, 110, 520, 380, 0); }
-    else if (kind == 1) { wm_open("Acerca de", 560, 160, 420, 300, 1); }
+    else if (kind == WK_FILES) {
+        int s = wm_open("Archivos", 120, 90, 560, 400, WK_FILES);
+        if (s >= 0) g_wins[s].dir_ino = ext4_root();
+    }
+    else if (kind == WK_FSRAM) { wm_open("fsram (RAM)", 180, 130, 480, 340, WK_FSRAM); }
+    else if (kind == WK_ABOUT) { wm_open("Acerca de", 560, 160, 420, 300, WK_ABOUT); }
 }
 
 /* ------------------------------ Escritorio -------------------------------- */
@@ -375,6 +475,43 @@ static void draw_cursor(void) {
         for (int c = 0; c < 12; c++)
             if (g_cursor[r] & (1u << c))
                 gfx_pixel(mx + c, my + r, 0xFFFFFF);
+}
+
+/* ------------------------------ Explorador ------------------------------- */
+static int explorer_entry(uint32_t dir, int vis, ext4_dirent_t *de) {
+    int v = 0;
+    for (int i = 0; ; i++) {
+        int r = ext4_readdir(dir, i, de);
+        if (r <= 0) return 0;
+        if (de->name[0] == '.' && de->name[1] == '\0') continue;  /* omite "." */
+        if (v == vis) return 1;
+        v++;
+    }
+}
+
+static void explorer_enter(win_t *w, ext4_dirent_t *de) {
+    if (strcmp(de->name, "..") == 0) {
+        w->dir_ino = de->ino;
+        int len = (int)strlen(w->path);
+        while (len > 1 && w->path[len - 1] != '/') len--;
+        if (len > 1) len--;                 /* quita la barra */
+        w->path[len] = '\0';
+        if (w->path[0] == '\0') { w->path[0] = '/'; w->path[1] = '\0'; }
+    } else {
+        w->dir_ino = de->ino;
+        int len = (int)strlen(w->path);
+        if (!(len == 1 && w->path[0] == '/') && len < 180) {
+            w->path[len] = '/'; w->path[len + 1] = '\0'; len++;
+        } else if (len == 1 && w->path[0] == '/') {
+            /* raiz: no anadir barra extra */
+        }
+        int n = (int)strlen(de->name);
+        if (len + n < 180) {
+            for (int i = 0; i < n; i++) w->path[len + i] = de->name[i];
+            w->path[len + n] = '\0';
+        }
+    }
+    w->sel = 0;
 }
 
 /* ------------------------------ Entrada ----------------------------------- */
@@ -454,6 +591,31 @@ int wm_update(void) {
             }
             z_raise(hit);
             g_focus = hit;
+
+            /* Explorador: primer clic selecciona, segundo abre. */
+            if (w->kind == WK_FILES && my >= w->y + TITLE_H) {
+                int lh = gfx_text_h(TX_SCALE) + 8;
+                int listTop = w->y + TITLE_H + 8 + lh * 2;
+                if (my >= listTop) {
+                    int row = (my - listTop) / lh;
+                    ext4_dirent_t de;
+                    if (explorer_entry(w->dir_ino, row, &de)) {
+                        if (row == w->sel) {
+                            if (de.type == EXT4_FT_DIR) {
+                                explorer_enter(w, &de);
+                            } else {
+                                int s = wm_open(de.name, w->x + 40, w->y + 40,
+                                                600, 380, WK_VIEW);
+                                if (s >= 0) g_wins[s].dir_ino = de.ino;
+                            }
+                        } else {
+                            w->sel = row;
+                        }
+                    }
+                }
+                return 1;
+            }
+
             if (my < w->y + TITLE_H) g_drag = hit;
         }
         return 1;

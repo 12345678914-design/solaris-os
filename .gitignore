@@ -3,6 +3,7 @@
 *.d
 *.bin
 *.iso
+*.img
 iso/
 
 # Capturas y registros de pruebas

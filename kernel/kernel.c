@@ -9,6 +9,7 @@
 #include "graphics/logo.h"
 #include "terminal/terminal.h"
 #include "fs/fsram.h"
+#include "fs/ext4.h"
 #include "gui/gui.h"
 
 #define MAXCOMMAND 128
@@ -428,6 +429,26 @@ static void pantalla_about(void) {
     term_set_cursor_px(0, (uint32_t)(abajo + (int)ch));
 }
 
+/* ------------------------- ext4 (disco principal) ------------------------ */
+static void cmd_ext4(void) {
+    if (!ext4_mounted()) {
+        imprimir("ext4: no montado (sin disco o formato invalido)", "rojo", 1);
+        return;
+    }
+    imprimir("ext4 (solo lectura) montado en /:", "verde", 1);
+    ext4_dirent_t de;
+    int n = 0;
+    for (int i = 0; ; i++) {
+        int r = ext4_readdir(ext4_root(), i, &de);
+        if (r <= 0) break;
+        if (de.name[0] == '.') continue;
+        if (de.type == EXT4_FT_DIR) imprimir(de.name, "cyan", 1);
+        else                        imprimir(de.name, "blanco", 1);
+        n++;
+    }
+    if (n == 0) imprimir("(vacio)", "amarillo", 1);
+}
+
 /* ------------------------- Procesamiento de comandos --------------------- */
 void procesar_comando(char *text) {
     char *p = text;
@@ -452,6 +473,7 @@ void procesar_comando(char *text) {
         imprimir("  rm <n>                  elimina archivo", "amarillo", 1);
         imprimir("  edit <n>                editor de lineas (:wq salir)", "amarillo", 1);
         imprimir("  mem                     uso de memoria", "amarillo", 1);
+        imprimir("  ext4                    lista el disco ext4 (solo lectura)", "amarillo", 1);
     }
     else if (strcmp(cmd, "about") == 0)  pantalla_about();
     else if (strcmp(cmd, "clear") == 0)  term_clear();
@@ -464,6 +486,7 @@ void procesar_comando(char *text) {
     else if (strcmp(cmd, "append") == 0) { char *n = next_arg(&p); cmd_append(n, p); }
     else if (strcmp(cmd, "edit") == 0)   cmd_edit(next_arg(&p));
     else if (strcmp(cmd, "mem") == 0)    cmd_mem();
+    else if (strcmp(cmd, "ext4") == 0)   cmd_ext4();
     else if (strcmp(cmd, "shutdown") == 0) { imprimir("Apagando...", "verde", 1); apagar(); }
     else if (strcmp(cmd, "reboot") == 0)   { imprimir("reiniciando...", "verde", 1); reiniciar(); }
     else {
@@ -509,6 +532,7 @@ void kernel_main(uint32_t magic, uint64_t mb_info) {
     mtrr_write_combining(fbi.addr, (uint64_t)fbi.pitch * fbi.height);
     heap_init();
     fs_init();
+    ext4_init();
     term_init(COLOR_WHITE, COLOR_BLACK);
     input_init((int)fb_width(), (int)fb_height());
 
