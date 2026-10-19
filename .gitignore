@@ -1,0 +1,12 @@
+# Artefactos de compilacion
+*.o
+*.d
+*.bin
+*.iso
+iso/
+
+# Capturas y registros de pruebas
+*.ppm
+*.png
+*.log
+*.pid
